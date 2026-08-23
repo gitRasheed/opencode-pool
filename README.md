@@ -46,8 +46,8 @@ re-enable them. One subtlety: when a subagent spawns, opencode keeps only
 the parent rules named `external_directory` or carrying a deny (matched by
 name, not wildcard), so the ruleset also carries an explicit
 `external_directory` allow. The pool additionally sets
-`OPENCODE_PERMISSION` on the server process as a backstop for the ask
-paths a session ruleset never reaches (`doom_loop`, workflow approvals).
+`OPENCODE_PERMISSION` on the server process as a backstop for ask paths
+a session ruleset never reaches, such as `doom_loop`.
 
 `POST /session/{id}/message` blocks and returns the final message, so no
 polling or SSE is needed. HTTP 200 can still carry `info.error`; check it.
