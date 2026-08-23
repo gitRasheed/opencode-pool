@@ -84,5 +84,5 @@ callers need isolation from each other, look there first.
 
 Pinned to the 1.18.x server API, which is not a stable contract. Auth is
 HTTP Basic via `OPENCODE_SERVER_PASSWORD` (the pool generates one per
-`up`). Built with Claude; the operating facts come from measured tests,
-not docs.
+`up`). The documented behavior comes from measured tests, not
+the server docs.
