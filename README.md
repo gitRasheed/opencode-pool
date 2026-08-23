@@ -68,10 +68,13 @@ Two footguns cost us hours:
 opencode run --auto -m <model> "your prompt" < /dev/null
 ```
 
-Always pass `--auto`, and always redirect stdin: `opencode run` blocks
-forever on an inherited non-TTY stdin when the prompt is long. Python's
-`subprocess.run(capture_output=True)` is immune because the child gets a
-pipe.
+Always pass `--auto`, and always redirect stdin: whenever fd 0 is a
+non-TTY that never reaches EOF (a socket, an open pipe), `opencode run`
+reads stdin to EOF before doing anything, even when the prompt was passed
+as an argument. Prompt length is irrelevant. From Python, pass
+`stdin=subprocess.DEVNULL` explicitly; `capture_output=True` does not
+cover stdin, and only looks safe when the parent's own stdin happens to
+be /dev/null.
 
 ## Related
 
