@@ -42,7 +42,12 @@ permission events client-side. Over raw HTTP, an unanswered permission ask
 hangs the blocking call forever. The pool sends allow-all plus the three
 denies the CLI itself always sends (`question`, `plan_enter`,
 `plan_exit`). Rules match last-to-first, so a bare allow-all would
-re-enable them.
+re-enable them. One subtlety: when a subagent spawns, opencode keeps only
+the parent rules named `external_directory` or carrying a deny (matched by
+name, not wildcard), so the ruleset also carries an explicit
+`external_directory` allow. The pool additionally sets
+`OPENCODE_PERMISSION` on the server process as a backstop for the ask
+paths a session ruleset never reaches (`doom_loop`, workflow approvals).
 
 `POST /session/{id}/message` blocks and returns the final message, so no
 polling or SSE is needed. HTTP 200 can still carry `info.error`; check it.

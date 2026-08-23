@@ -34,10 +34,21 @@ BASE_PORT = int(os.environ.get("OC_POOL_BASE_PORT", 4310))
 # must follow the allow-all
 PERMISSION = [
     {"permission": "*", "pattern": "*", "action": "allow"},
+    # subagents keep only external_directory rules and denies from the parent
+    # ruleset (matched by name, not wildcard), so the blanket allow above is
+    # dropped for them; this explicit rule survives the filter
+    {"permission": "external_directory", "pattern": "*", "action": "allow"},
     {"permission": "question", "pattern": "*", "action": "deny"},
     {"permission": "plan_enter", "pattern": "*", "action": "deny"},
     {"permission": "plan_exit", "pattern": "*", "action": "deny"},
 ]
+
+# process-wide backstop: merges last into every agent's policy, covering the
+# paths a session ruleset never reaches (doom_loop asks, workflow approvals);
+# key order matters, rules match last-to-first
+ENV_PERMISSION = json.dumps({"*": "allow", "external_directory": "allow",
+                             "question": "deny", "plan_enter": "deny",
+                             "plan_exit": "deny", "doom_loop": "deny"})
 
 
 def _req(pool, port, method, path, body=None, timeout=30):
@@ -60,7 +71,8 @@ def _healthy(pool, port):
 
 
 def _spawn(port, password):
-    env = dict(os.environ, OPENCODE_SERVER_PASSWORD=password)
+    env = dict(os.environ, OPENCODE_SERVER_PASSWORD=password,
+               OPENCODE_PERMISSION=ENV_PERMISSION)
     p = subprocess.Popen([OPENCODE, "serve", "--port", str(port)], cwd=WORKDIR, env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
