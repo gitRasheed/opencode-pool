@@ -20,8 +20,10 @@ session rather than globally.
 ```python
 from oc_pool import generate
 text = generate("openai/gpt-5.6-sol-fast", "your prompt", variant="high")
-# returns None on failure; the pool health-checks and respawns dead servers
 ```
+
+`generate` returns None on failure. The pool health-checks servers before
+use and respawns dead ones.
 
 Scaling rule: `N = ceil(peak concurrent calls / 16)`. One server measured
 comfortable at ~32 in flight (23x parallelism, flat latency). Past that,
@@ -55,19 +57,23 @@ DB rather than maintaining it.
 
 ## If you are scripting the CLI instead
 
-Two footguns cost us hours. Always pass `--auto`, and always redirect
-stdin (`< /dev/null`): `opencode run` blocks forever on an inherited
-non-TTY stdin when the prompt is long. Python's
+Two footguns cost us hours:
+
+```bash
+opencode run --auto -m <model> "your prompt" < /dev/null
+```
+
+Always pass `--auto`, and always redirect stdin: `opencode run` blocks
+forever on an inherited non-TTY stdin when the prompt is long. Python's
 `subprocess.run(capture_output=True)` is immune because the child gets a
 pipe.
 
 ## Related
 
 [opencode-runtime](https://github.com/ashish16052/opencode-runtime) also
-wraps the opencode server, but for a different problem: it isolates one
-server per tenant. This pool goes the other way and pushes maximum
-throughput through one shared server. If you need isolation between
-callers, look there first.
+wraps the opencode server for a different problem: one isolated server per
+tenant. This pool shares servers to cut process and memory overhead. If
+callers need isolation from each other, look there first.
 
 ## Caveats
 

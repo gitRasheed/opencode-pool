@@ -1,18 +1,10 @@
-"""Shared opencode server pool: one ~600MB server replaces N ~500MB CLI spawns.
+"""Run opencode generations through shared server processes.
 
 Built against opencode 1.18.21; the server API is not a stable contract, so
-re-verify the endpoints if a major version changes behavior.
+re-verify endpoints when the major version changes.
 
-Design facts (measured, e033/local/opencode-server-spec-raw.txt): POST
-/session/{id}/message blocks until completion; per-session locking only, so
-one server runs ~16 prompts genuinely in parallel; ONE shared working
-directory keeps RSS flat (per-directory state leaks ~52MB forever); the
-permission ruleset at session-create is the server-side equivalent of --auto,
-without it a permission ask hangs the call forever; HTTP 200 can still carry
-info.error. Servers are cattle: health-check, respawn, discard the DB.
-
-CLI:  oc_pool.py up [N] | down | status
-Lib:  generate(model, prompt, variant=None, timeout=600) -> text or None
+CLI: oc_pool.py up [N] | down | status
+Library: generate(model, prompt, variant=None, timeout=600) -> text or None
 
 Scaling rule for orchestrators: servers = ceil(peak concurrent LLM calls / 16).
 """
@@ -26,22 +18,20 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 from pathlib import Path
 
 import shutil
 
 STATE = Path(os.environ.get("OC_POOL_STATE", Path.home() / ".cache/opencode-pool.json"))
-# one shared workdir for ALL sessions, on a native filesystem: opencode keys
-# server state by directory and never evicts it (~52MB leaked per distinct
-# directory), while one directory stays flat
+# one shared native-filesystem workdir: opencode keeps ~52MB of never-evicted
+# state per distinct directory
 WORKDIR = Path(os.environ.get("OC_POOL_WORKDIR", Path.home() / ".local/share/opencode-pool/workdir"))
 OPENCODE = os.environ.get("OC_POOL_BIN") or shutil.which("opencode") or str(Path.home() / ".opencode/bin/opencode")
 BASE_PORT = int(os.environ.get("OC_POOL_BASE_PORT", 4310))
 
-# what `opencode run --auto` answers client-side, expressed as server-side rules;
-# the three denies must stay (last-match-wins: a bare allow-* re-enables them)
+# server-side mirror of `opencode run --auto`; last-match-wins, so the denies
+# must follow the allow-all
 PERMISSION = [
     {"permission": "*", "pattern": "*", "action": "allow"},
     {"permission": "question", "pattern": "*", "action": "deny"},
@@ -132,8 +122,7 @@ def _revive(pool, srv):
 
 
 def generate(model, prompt, variant=None, timeout=600):
-    """One prompt -> final text via the pool; None on failure. Retries once
-    on a fresh server. Falls back to None (caller may use the CLI path)."""
+    """Return the generated text, or None on failure (one retry on transport errors)."""
     pool = _load()
     if not pool:
         return None
