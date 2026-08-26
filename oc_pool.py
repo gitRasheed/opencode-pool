@@ -4,7 +4,8 @@ Built against opencode 1.18.21; the server API is not a stable contract, so
 re-verify endpoints when the major version changes.
 
 CLI: oc_pool.py up [N] | down | status
-Library: generate(model, prompt, variant=None, timeout=600) -> text or None
+Library: generate(model, prompt, variant=None, timeout=600, meta=None,
+tools=False) -> text or None; pass a dict as meta to get tokens/cost back.
 
 Scaling rule for orchestrators: servers = ceil(peak concurrent LLM calls / 16).
 """
@@ -17,6 +18,7 @@ import secrets
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -133,8 +135,30 @@ def _revive(pool, srv):
     return False
 
 
-def generate(model, prompt, variant=None, timeout=600):
-    """Return the generated text, or None on failure (one retry on transport errors)."""
+def _acc_usage(meta, info):
+    """Accumulate tokens/cost into meta. Adds, never overwrites: usage from a
+    billed-but-failed attempt, an internal retry, or one step of a multi-step
+    response would otherwise vanish from the caller's accounting."""
+    if not isinstance(meta, dict) or not isinstance(info, dict):
+        return
+    acc = meta.setdefault("tokens", {})
+    for k, v in (info.get("tokens") or {}).items():
+        if isinstance(v, (int, float)):
+            acc[k] = acc.get(k, 0) + v
+        elif isinstance(v, dict):
+            sub = acc.setdefault(k, {})
+            for k2, v2 in v.items():
+                if isinstance(v2, (int, float)):
+                    sub[k2] = sub.get(k2, 0) + v2
+    if isinstance(info.get("cost"), (int, float)):
+        meta["cost"] = meta.get("cost", 0) + info["cost"]
+
+
+def generate(model, prompt, variant=None, timeout=600, meta=None, tools=False):
+    """Return the generated text, or None on failure (one retry on transport errors).
+    Pass a dict as meta to receive tokens/cost from the response in place.
+    timeout is a wall-clock bound: a stream that trickles bytes forever cannot
+    hold the caller past timeout+30s (socket timeouts only guard inactivity)."""
     pool = _load()
     if not pool:
         return None
@@ -150,11 +174,31 @@ def generate(model, prompt, variant=None, timeout=600):
             sid = ses["id"]
             body = {"agent": "build",
                     "model": {"providerID": provider, "modelID": model_id},
-                    "tools": {"*": False},
                     "parts": [{"type": "text", "text": prompt}]}
+            if not tools:
+                body["tools"] = {"*": False}
             if variant:
                 body["variant"] = variant
-            msg = _req(pool, srv["port"], "POST", f"/session/{sid}/message", body, timeout=timeout)
+            box = {}
+
+            def _post():
+                try:
+                    box["msg"] = _req(pool, srv["port"], "POST",
+                                      f"/session/{sid}/message", body, timeout=timeout)
+                except Exception as e:
+                    box["err"] = e
+            th = threading.Thread(target=_post, daemon=True)
+            th.start()
+            th.join(timeout + 30)
+            if "err" in box:
+                raise box["err"]
+            if "msg" not in box:
+                raise TimeoutError(f"generation exceeded {timeout + 30}s wall clock")
+            msg = box["msg"]
+            steps = [p for p in msg["parts"]
+                     if p.get("type") == "step-finish" and (p.get("tokens") or p.get("cost"))]
+            for u in (steps or [msg["info"]]):
+                _acc_usage(meta, u)
             if msg["info"].get("error"):
                 return None
             return "".join(p.get("text", "") for p in msg["parts"] if p.get("type") == "text")

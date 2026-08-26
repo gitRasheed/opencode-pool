@@ -19,11 +19,27 @@ session rather than globally.
 
 ```python
 from oc_pool import generate
-text = generate("openai/gpt-5.6-sol-fast", "your prompt", variant="high")
+meta = {}
+text = generate("openai/gpt-5.6-sol-fast", "your prompt", variant="high",
+                timeout=600, meta=meta, tools=False)
 ```
 
 `generate` returns None on failure. The pool health-checks servers before
 use and respawns dead ones.
+
+Pass a dict as `meta` to get usage back: `meta["tokens"]`
+(input/output/reasoning plus a nested cache read/write dict) and
+`meta["cost"]`. Usage accumulates across the internal retry and across the
+steps of a multi-step response, so a billed-but-failed attempt still shows
+up in the numbers.
+
+`tools=False` (the default) disables all tools for the generation, which is
+what you want for pure text workers. `tools=True` leaves the model's tool
+access as the server configures it.
+
+`timeout` is a wall-clock bound, not just a socket timeout. A stream that
+keeps trickling bytes resets a socket inactivity timer forever; the pool
+bounds the whole call at `timeout + 30s` and aborts the session at expiry.
 
 Scaling rule: `N = ceil(peak concurrent calls / 16)`. One server measured
 comfortable at ~32 in flight (23x parallelism, flat latency). Past that,
