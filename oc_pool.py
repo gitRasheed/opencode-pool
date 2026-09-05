@@ -5,7 +5,7 @@ re-verify endpoints when the major version changes.
 
 CLI: oc_pool.py up [N] | down | status
 Library: generate(model, prompt, variant=None, timeout=600, meta=None,
-tools=False) -> text or None; pass a dict as meta to get tokens/cost back.
+tools=False) -> text or None; meta receives usage and latest-call diagnostics.
 
 Scaling rule for orchestrators: servers = ceil(peak concurrent LLM calls / 16).
 """
@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 import shutil
@@ -156,19 +157,45 @@ def _acc_usage(meta, info):
 
 def generate(model, prompt, variant=None, timeout=600, meta=None, tools=False):
     """Return the generated text, or None on failure (one retry on transport errors).
-    Pass a dict as meta to receive tokens/cost from the response in place.
-    timeout is a wall-clock bound: a stream that trickles bytes forever cannot
-    hold the caller past timeout+30s (socket timeouts only guard inactivity)."""
+    Pass a dict as meta to receive usage and the latest generation timing/errors.
+    Each message attempt has a timeout+30s wall-clock bound. Health checks,
+    session cleanup and the transport retry can extend the full call."""
+    started = time.monotonic()
+    report = {"attempts": 0, "ok": False, "failures": []}
+    if isinstance(meta, dict):
+        meta["generation"] = report
+    try:
+        result = _generate(model, prompt, variant, timeout, meta, tools, report)
+        report["ok"] = bool(result)
+        return result
+    finally:
+        report["seconds"] = round(time.monotonic() - started, 3)
+
+
+def _failure(report, category, started, status=None):
+    report["failures"].append({
+        "category": category,
+        "status": status if type(status) is int and 100 <= status <= 599 else None,
+        "seconds": round(time.monotonic() - started, 3),
+    })
+
+
+def _generate(model, prompt, variant, timeout, meta, tools, report):
+    started = time.monotonic()
     pool = _load()
-    if not pool:
+    if not pool or not pool.get("servers"):
+        _failure(report, "no_pool", started)
         return None
     provider, model_id = model.split("/", 1)
     for attempt in range(2):
+        started = time.monotonic()
+        report["attempts"] += 1
         srv = random.choice(pool["servers"])
-        if not _healthy(pool, srv["port"]) and not _revive(pool, srv):
-            continue
         sid = None
         try:
+            if not _healthy(pool, srv["port"]) and not _revive(pool, srv):
+                _failure(report, "unhealthy_pool", started)
+                continue
             ses = _req(pool, srv["port"], "POST", "/session",
                        {"title": f"gen-{os.getpid()}", "agent": "build", "permission": PERMISSION})
             sid = ses["id"]
@@ -200,9 +227,27 @@ def generate(model, prompt, variant=None, timeout=600, meta=None, tools=False):
             for u in (steps or [msg["info"]]):
                 _acc_usage(meta, u)
             if msg["info"].get("error"):
+                error = msg["info"]["error"]
+                data = error.get("data") if isinstance(error, dict) else None
+                status = data.get("statusCode") if isinstance(data, dict) else None
+                _failure(report, "provider_error", started, status)
                 return None
-            return "".join(p.get("text", "") for p in msg["parts"] if p.get("type") == "text")
-        except Exception:
+            text = "".join(p.get("text", "") for p in msg["parts"] if p.get("type") == "text")
+            if not text:
+                _failure(report, "empty_response", started)
+            return text
+        except Exception as error:
+            status = None
+            if isinstance(error, urllib.error.HTTPError):
+                category, status = "http_error", error.code
+            elif isinstance(error, TimeoutError) or (
+                    isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)):
+                category = "timeout"
+            elif isinstance(error, (KeyError, TypeError, ValueError, AttributeError)):
+                category = "invalid_response"
+            else:
+                category = "transport_error"
+            _failure(report, category, started, status)
             try:
                 if sid:
                     _req(pool, srv["port"], "POST", f"/session/{sid}/abort", {}, timeout=10)

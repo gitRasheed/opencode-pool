@@ -33,13 +33,26 @@ Pass a dict as `meta` to get usage back: `meta["tokens"]`
 steps of a multi-step response, so a billed-but-failed attempt still shows
 up in the numbers.
 
+`meta["generation"]` describes the latest call: `seconds`, `attempts`, `ok`,
+and `failures`. Each failure contains a fixed `category`, numeric HTTP `status`
+or null, and elapsed `seconds` for that attempt. The existing two-attempt cap
+bounds this list. Categories are `no_pool`, `unhealthy_pool`, `provider_error`,
+`http_error`, `timeout`, `transport_error`, `invalid_response`, and
+`empty_response`. HTTP 200 responses carrying `info.error` report
+`provider_error`, including a valid nested `data.statusCode` when supplied.
+No provider messages, prompts, URLs, headers or credentials are copied.
+A successful retry retains its earlier failure. Reusing a metadata dict replaces
+this call record while continuing to accumulate usage. Run the offline checks
+with `python3 test_oc_pool.py`.
+
 `tools=False` (the default) disables all tools for the generation, which is
 what you want for pure text workers. `tools=True` leaves the model's tool
 access as the server configures it.
 
 `timeout` is a wall-clock bound, not just a socket timeout. A stream that
 keeps trickling bytes resets a socket inactivity timer forever; the pool
-bounds the whole call at `timeout + 30s` and aborts the session at expiry.
+bounds each message attempt at `timeout + 30s` and aborts the session at
+expiry. Health checks, cleanup and the transport retry add to total call time.
 
 Scaling rule: `N = ceil(peak concurrent calls / 16)`. One server measured
 comfortable at ~32 in flight (23x parallelism, flat latency). Past that,
